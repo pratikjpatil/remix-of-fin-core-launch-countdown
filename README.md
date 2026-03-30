@@ -1,178 +1,34 @@
-Here are the exact, complete files with every original line retained and the critical TLS/SSL corrections applied. You can safely copy and paste these directly into your production environment.
-1. common.runtime.properties
-####################################################################
-# Apache Druid - Common Runtime Properties (Shared Across All Nodes)
-# Production-grade with HTTPS/SSL enabled
-####################################################################
+I completely understand. When a production cluster goes down, you don't need theory or background explanations—you just need the exact commands to find the root cause quickly.
+Please ask your DevOps engineer to run the following sequence of commands on the servers. They just need to copy, paste, and run these.
+(Note for the engineer: Please replace /path/to/druid/logs/ in these commands with the actual path to your Druid log files, such as /var/druid/log/ or /opt/druid/var/log/).
+Step 1: Check if the JVM Processes are Actually Running
+Before looking at logs, we need to know if the Druid nodes are crashing immediately or staying alive but failing to connect.
+Run this on any node that is failing:
+jps -m | grep -i druid
 
-# ===============================
-# Extensions
-# ===============================
-druid.extensions.directory=extensions
-druid.extensions.loadList=["postgresql-metadata-storage","druid-hdfs-storage","druid-parquet-extensions","druid-avro-extensions","druid-kafka-indexing-service","druid-deltalake-extensions"]
-#druid.extensions.hadoopDependenciesDir=hadoop-dependencies
+Screenshot this output. It tells us if the Java processes for MiddleManager, Broker, etc., are surviving startup.
+Step 2: Verify the Guice SSL Error is Fixed
+We need to confirm the configuration changes we made actually fixed the original NullPointerException.
+Run this specifically on the MiddleManager node:
+grep -iC 3 "NullPointerException.*trustStorePath" /path/to/druid/logs/middlemanager.log
 
-# ===============================
-# Metadata Storage (PostgreSQL)
-# ===============================
-druid.metadata.storage.type=postgresql
-druid.metadata.storage.connector.connectURI=jdbc:postgresql://fcprodhdfsjn7:5435/druid
-druid.metadata.storage.connector.user=druid
-druid.metadata.storage.connector.password=Password#1234
+Screenshot the output. If it returns nothing, our fix worked. If it returns text, the new runtime.properties file wasn't picked up.
+Step 3: Check for SSL/TLS Handshake Failures
+Since we just enforced strict internal SSL, the most likely cause of the current outage is nodes rejecting each other's certificates.
+Run this on the Overlord and Broker nodes:
+grep -iE "SSLHandshakeException|PKIX path building failed|SSLException" /path/to/druid/logs/*.log | tail -n 20
 
-# ===============================
-# Zookeeper Configuration
-# ===============================
-druid.zk.service.host=jn1:2281,jn2:2281,jn3:2281,jn4:2281,jn5:2281,jn6:2281,jn7:2281
-druid.zk.paths.base=/druid
+Screenshot this output. This will instantly tell us if the keystores/truststores are mismatched across the cluster.
+Step 4: Check PostgreSQL (Metadata) Connectivity
+If the Master nodes (Coordinator/Overlord) can't talk to Postgres, the entire cluster will refuse to start routing traffic.
+Run this on the Coordinator and Overlord nodes:
+grep -iE "PSQLException|Connection refused|Failed to start metadata" /path/to/druid/logs/coordinator.log /path/to/druid/logs/overlord.log | tail -n 20
 
-# ===============================
-# Deep Storage
-# ===============================
-#druid.storage.type=local
-#druid.storage.storageDirectory=var/druid/segments
+Screenshot this output. If Postgres is rejecting the connection, we will see it here.
+Step 5: Check Zookeeper Connectivity
+If the data nodes (Historicals/MiddleManagers) can't announce themselves to Zookeeper, the cluster will appear dead.
+Run this on the Historical and MiddleManager nodes:
+grep -iE "KeeperErrorCode|ConnectionLoss|SessionExpired" /path/to/druid/logs/*.log | tail -n 20
 
-# Add the new HDFS deep storage settings
-druid.storage.type=hdfs
-druid.storage.storageDirectory=hdfs://fincore/druid/segments
-
-druid.indexer.logs.type=hdfs
-druid.indexer.logs.directory=hdfs://fincore/druid/indexing-logs
-# ===============================
-# Indexing Logs (MiddleManager Task Logs)
-# ===============================
-#druid.indexer.logs.type=file
-#druid.indexer.logs.directory=var/druid/indexing-logs
-
-# ===============================
-# Service Discovery (used by all nodes)
-# ===============================
-druid.selectors.indexing.serviceName=druid/overlord
-druid.selectors.coordinator.serviceName=druid/coordinator
-
-# ===============================
-# Coordinator and Overlord Properties
-# ===============================
-druid.coordinator.startDelay=PT30S
-druid.coordinator.period=PT30S
-
-druid.indexer.queue.startDelay=PT30S
-druid.indexer.runner.type=remote
-druid.indexer.storage.type=metadata
-
-# ===============================
-# Logging Configuration
-# ===============================
-druid.monitoring.monitors=["org.apache.druid.java.util.metrics.JvmMonitor"]
-druid.emitter=logging
-druid.emitter.logging.logLevel=info
-druid.startup.logging.logProperties=true
-
-# ===============================
-# Time and Locale
-# ===============================
-user.timezone=Asia/Kolkata
-user.language=en
-
-####################################################################
-# HTTPS / SSL Configuration (applies to all nodes)
-####################################################################
-
-# --- Enable HTTPS globally ---
-druid.enableTlsPort=true
-druid.server.https.enable=true
-# Each node will define its own druid.server.https.port and druid.server.https.keyStorePath in its runtime.properties
-
-# --- Enforce secure inter-node communication ---
-druid.internal.http.useSSL=true
-druid.client.https.enabled=true
-
-# --- Keystore (each node overrides path and password in its runtime.properties) ---
-druid.server.https.keyStoreType=JKS
-
-# --- Common Truststore (shared by all nodes) ---
-druid.server.https.trustStoreType=JKS
-druid.server.https.trustStorePath=/media/production-setup/apache-druid-34.0.0/ssl/truststore.jks
-druid.server.https.trustStorePassword=DruidPass123
-
-# --- Druid Internal HTTPS Client (used by nodes to talk securely) ---
-druid.client.https.trustStoreType=JKS
-druid.client.https.trustStorePath=/media/production-setup/apache-druid-34.0.0/ssl/truststore.jks
-druid.client.https.trustStorePassword=DruidPass123
-
-####################################################################
-# Optional: JVM / Threading / Misc tuning
-####################################################################
-# Node-specific JVM tuning goes into each node’s jvm.config
-
-2. jvm.config
--server
--Xms4g
--Xmx4g
--XX:+UseG1GC
--XX:MaxGCPauseMillis=100
--XX:+ExitOnOutOfMemoryError
--Duser.timezone=Asia/Kolkata
--Dfile.encoding=UTF-8
--Djava.io.tmpdir=var/tmp
--Djava.util.logging.manager=org.apache.logging.log4j.jul.LogManager
--Djavax.net.ssl.trustStoreType=JKS
--Djavax.net.ssl.trustStore=/media/production-setup/apache-druid-34.0.0/ssl/truststore.jks
--Djavax.net.ssl.trustStorePassword=DruidPass123
--Djavax.net.ssl.keyStoreType=JKS
--Djavax.net.ssl.keyStore=/media/production-setup/apache-druid-34.0.0/ssl/druid-keystore.jks
--Djavax.net.ssl.keyStorePassword=DruidPass123
---add-opens=jdk.management/com.sun.management.internal=ALL-UNNAMED
-
-3. runtime.properties (MiddleManager)
-druid.service=druid/middleManager
-druid.host=fcproddruidhist1
-druid.enableTlsPort=true
-druid.server.https.enable=true
-druid.tlsPort=8284
-
-# Number of tasks per middleManager
-druid.worker.capacity=4
-druid.worker.baseTaskDirs=[\"var/druid/task\"]
-
-# Task launch parameters
-druid.indexer.runner.javaOptsArray=["-server","-Xms8g","-Xmx8g","-XX:MaxDirectMemorySize=3g","-Duser.timezone=Asia/Kolkata","-Dfile.encoding=UTF-8","-XX:+ExitOnOutOfMemoryError","-Djava.util.logging.manager=org.apache.logging.log4j.jul.LogManager","-Djavax.net.ssl.trustStoreType=JKS","-Djavax.net.ssl.trustStore=/media/production-setup/apache-druid-34.0.0/ssl/truststore.jks","-Djavax.net.ssl.trustStorePassword=DruidPass123"]
-
-# ===============================
-# Zookeeper Configuration
-# ===============================
-druid.zk.service.host=jn1:2281,jn2:2281,jn3:2281,jn4:2281,jn5:2281,jn6:2281,jn7:2281
-druid.zk.paths.base=/druid
-
-# HTTP server threads
-druid.server.http.numThreads=60
-
-# Processing threads and buffers on Peons
-druid.indexer.fork.property.druid.processing.numMergeBuffers=2
-druid.indexer.fork.property.druid.processing.buffer.sizeBytes=536870912
-druid.indexer.fork.property.druid.processing.numThreads=3
-
-# Hadoop indexing
-druid.indexer.task.hadoopWorkingPath=var/druid/hadoop-tmp
-
-# ===============================
-# Time and Locale
-# ===============================
-user.timezone=Asia/Kolkata
-user.language=en
-
-# Shared Truststore (common for all nodes)
-druid.server.https.trustStoreType=JKS
-druid.server.https.trustStorePath=/media/production-setup/apache-druid-34.0.0/ssl/truststore.jks
-druid.server.https.trustStorePassword=DruidPass123
-
-druid.server.https.keyStoreType=JKS
-druid.server.https.keyStorePath=/media/production-setup/apache-druid-34.0.0/ssl/druid-keystore.jks
-druid.server.https.keyStorePassword=DruidPass123
-
-# --- Druid Internal HTTPS Client (used by nodes to talk securely) ---
-druid.client.https.trustStoreType=JKS
-druid.client.https.trustStorePath=/media/production-setup/apache-druid-34.0.0/ssl/truststore.jks
-druid.client.https.trustStorePassword=DruidPass123
-
-Would you like me to walk you through any troubleshooting steps if the Peons encounter task assignment issues after this restart?
+Screenshot this output. It will show if the network between Druid and your jn1-jn7 Zookeeper nodes is blocked.
+Please have your DevOps engineer run these and share the screenshots with me. I will analyze them immediately and give you the exact fix. Ready when you are!
